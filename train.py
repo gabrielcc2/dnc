@@ -22,7 +22,7 @@ import tensorflow as tf
 import sonnet as snt
 
 from dnc import dnc
-from dnc import repeat_copy
+from dnc import one_hop_task
 
 FLAGS = tf.flags.FLAGS
 
@@ -43,7 +43,7 @@ tf.flags.DEFINE_float("optimizer_epsilon", 1e-10,
 
 # Task parameters
 tf.flags.DEFINE_integer("batch_size", 16, "Batch size for training.")
-tf.flags.DEFINE_integer("num_bits", 4, "Dimensionality of each vector to copy")
+tf.flags.DEFINE_integer("num_bits", 8, "Dimensionality of each vector to copy")
 tf.flags.DEFINE_integer(
     "min_length", 1,
     "Lower limit on number of vectors in the observation pattern to copy")
@@ -94,7 +94,7 @@ def run_model(input_sequence, output_size):
 def train(num_training_iterations, report_interval):
   """Trains the DNC and periodically reports the loss."""
 
-  dataset = repeat_copy.RepeatCopy(FLAGS.num_bits, FLAGS.batch_size,
+  dataset = one_hop_task.OneHop(FLAGS.num_bits, FLAGS.batch_size,
                                    FLAGS.min_length, FLAGS.max_length,
                                    FLAGS.min_repeats, FLAGS.max_repeats)
   dataset_tensors = dataset()
