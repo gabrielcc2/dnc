@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""A repeat copy task."""
+"""A one hop  task."""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -185,19 +185,16 @@ class OneHop(snt.AbstractModule):
       log_prob_in_bits=False,
       time_average_cost=False,
       name='one_hop',):
-    """Creates an instance of RepeatCopy task.
+    """Creates an instance of OneHop task.
 
     Args:
       name: A name for the generator instance (for name scope purposes).
       batch_size: Minibatch size per realization.
-      min_length: Lower limit on number of random binary vectors in the
-          observation pattern.
+      max_items: Size of sequence.
       max_length: Upper limit on number of random binary vectors in the
           observation pattern.
-      min_repeats: Lower limit on number of times the obervation pattern
-          is repeated in targ.
-      max_repeats: Upper limit on number of times the observation pattern
-          is repeated in targ.
+      max_edges: Limit on number of edges
+      max_questions: Upper limit on number of questions
       norm_max: Upper limit on uniform distribution w.r.t which the encoding
           of the number of repetitions presented in the observation sequence
           is normalised.
@@ -242,8 +239,6 @@ class OneHop(snt.AbstractModule):
     return self._word_length
 
   def _input_generator(self):
-
-
     for w in range(1000):
       obsarr = [[0 if x != self._word_length - 2 else 1 for x in range(self._word_length)]]
       targarr = [[0 for x in range(self._word_length)]]
@@ -366,7 +361,5 @@ class OneHop(snt.AbstractModule):
 
   def to_human_readable(self, data, model_output=None, whole_batch=False):
     obs = data.observations
-    unnormalised_num_reps_flag = self._unnormalise(obs[:,:,-1:]).round()
-    obs = np.concatenate([obs[:,:,:-1], unnormalised_num_reps_flag], axis=2)
     data = data._replace(observations=obs)
     return bitstring_readable(data, self.batch_size, model_output, whole_batch)
