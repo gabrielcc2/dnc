@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Example script to train the DNC on a repeated copy task."""
+"""Example script to train the DNC on the one hop task."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -42,18 +42,12 @@ tf.flags.DEFINE_float("optimizer_epsilon", 1e-10,
                       "Epsilon used for RMSProp optimizer.")
 
 # Task parameters
-tf.flags.DEFINE_integer("batch_size", 24, "Batch size for training.")
-tf.flags.DEFINE_integer("num_bits", 8, "Dimensionality of each vector to copy")
-tf.flags.DEFINE_integer(
-    "min_length", 1,
-    "Lower limit on number of vectors in the observation pattern to copy")
-tf.flags.DEFINE_integer(
-    "max_length", 2,
-    "Upper limit on number of vectors in the observation pattern to copy")
-tf.flags.DEFINE_integer("min_repeats", 1,
-                        "Lower limit on number of copy repeats.")
-tf.flags.DEFINE_integer("max_repeats", 2,
-                        "Upper limit on number of copy repeats.")
+tf.flags.DEFINE_integer("batch_size", 32, "Batch size for training.")
+tf.flags.DEFINE_integer("word_length", 20, "Overall size of observation (# possible vertices + start and end markers).")
+tf.flags.DEFINE_integer("max_items", 32, "Overall length of sequence.")
+tf.flags.DEFINE_integer("max_edges", 3, "Max number of edges in input sequence.")
+tf.flags.DEFINE_integer("max_questions", 3, "Max number of questions in input sequence.")
+
 
 # Training options.
 tf.flags.DEFINE_integer("num_training_iterations", 100000,
@@ -64,7 +58,6 @@ tf.flags.DEFINE_string("checkpoint_dir", "/tmp/tf/dnc",
                        "Checkpointing directory.")
 tf.flags.DEFINE_integer("checkpoint_interval", -1,
                         "Checkpointing step interval.")
-
 
 def run_model(input_sequence, output_size):
   """Runs model on input sequence."""
@@ -94,17 +87,12 @@ def run_model(input_sequence, output_size):
 def train(num_training_iterations, report_interval):
   """Trains the DNC and periodically reports the loss."""
 
-  dataset = one_hop_task.OneHop(FLAGS.num_bits, FLAGS.batch_size,
-                                   FLAGS.min_length, FLAGS.max_length,
-                                   FLAGS.min_repeats, FLAGS.max_repeats)
-  dataset_tensors = dataset()
+  dataset = one_hop_task.OneHop(FLAGS.batch_size,
+                                   FLAGS.word_length, FLAGS.max_items,
+                                   FLAGS.max_edges, FLAGS.max_questions)
 
-  #print("TO")
-  #print(dataset_tensors.observations)
-  #print("TS")
-  #print(dataset.target_size)
-  output_logits = run_model(dataset_tensors.observations, dataset.target_size)
-  # Used for visualization.
+  dataset_tensors = dataset()
+  output_logits = run_model(dataset_tensors.observations, dataset.word_length)
   output = tf.round(
       tf.expand_dims(dataset_tensors.mask, -1) * tf.sigmoid(output_logits))
 

@@ -22,6 +22,9 @@ import sonnet as snt
 import tensorflow as tf
 import numpy as np
 import random
+import copy
+
+from tensorflow import Tensor
 
 DatasetTensors = collections.namedtuple('DatasetTensors', ('observations',
                                                            'target', 'mask'))
@@ -114,7 +117,10 @@ def bitstring_readable(data, batch_size, model_output=None, whole_batch=False):
 
 
 class OneHop(snt.AbstractModule):
-  """Sequence data generator for the task of repeating a random binary pattern.
+  """Sequence data generator for the task of finding the one hop neighbors of an item in
+  a graph.
+
+  This is a small adaptation over the code for repeat copy from the original authors (https://github.com/deepmind/dnc)
 
   When called, an instance of this class will return a tuple of tensorflow ops
   (obs, targ, mask), representing an input sequence, target sequence, and
@@ -124,11 +130,17 @@ class OneHop(snt.AbstractModule):
   penalized and 0 otherwise.
 
   For each realisation from this generator, the observation sequence is
-  comprised of I.I.D. uniform-random binary vectors (and some flags).
+  comprised of some binary vectors (and some flags).
 
-  The target sequence is comprised of this binary pattern repeated
-  some number of times (and some flags). Before explaining in more detail,
-  let's examine the setup pictorially for a single batch element:
+  This observation sequence encodes the structure of some graph, providing
+  first 2 ones in the positions that correspond to the vertexes being connected,
+  followed by a 1 in the position of the start node, and 1 in the position of
+  the end node.
+
+  After giving the structure, it encodes some questions for the paired nodes.
+
+  The target sequence is comprised of the answers (the matching vertex).
+  Here's an example:
 
   ```none
   Note: blank space represents 0.
@@ -136,37 +148,25 @@ class OneHop(snt.AbstractModule):
   time ------------------------------------------>
 
                 +-------------------------------+
-  mask:         |0000000001111111111111111111111|
+  mask:         |0000000000111111111111111111111|
                 +-------------------------------+
 
                 +-------------------------------+
-  target:       |                              1| 'end-marker' channel.
-                |         101100110110011011001 |
-                |         010101001010100101010 |
+  target:       |               1              |
+                |                              |
+                |                              |
+                |             1                | 'start-marker' channel
+                |                1             | 'end-marker' channel.
                 +-------------------------------+
 
                 +-------------------------------+
-  observation:  | 1011001                       |
-                | 0101010                       |
-                |1                              | 'start-marker' channel
-                |        3                      | 'num-repeats' channel.
+  observation:  | 110110                       |
+                | 101000                       |
+                | 000101    1                  |
+                |1        1                    | 'start-marker' channel
+                |       1    1                 | 'end-marker' channel.
                 +-------------------------------+
   ```
-
-  The length of the random pattern and the number of times it is repeated
-  in the target are both discrete random variables distributed according to
-  uniform distributions whose parameters are configured at construction time.
-
-  The obs sequence has two extra channels (components in the trailing dimension)
-  which are used for flags. One channel is marked with a 1 at the first time
-  step and is otherwise equal to 0. The other extra channel is zero until the
-  binary pattern to be repeated ends. At this point, it contains an encoding of
-  the number of times the observation pattern should be repeated. Rather than
-  simply providing this integer number directly, it is normalised so that
-  a neural network may have an easier time representing the number of
-  repetitions internally. To allow a network to be readily evaluated on
-  instances of this task with greater numbers of repetitions, the range with
-  respect to which this encoding is normalised is also configurable by the user.
 
   As in the diagram, the target sequence is offset to begin directly after the
   observation sequence; both sequences are padded with zeros to accomplish this,
@@ -176,21 +176,19 @@ class OneHop(snt.AbstractModule):
 
   def __init__(
       self,
-      num_bits=6,
-      batch_size=1,
-      min_length=1,
-      max_length=1,
-      min_repeats=1,
-      max_repeats=2,
+      batch_size=32,
+      word_length=20,
+      max_items=32,
+      max_edges=3,
+      max_questions=3,
       norm_max=10,
       log_prob_in_bits=False,
       time_average_cost=False,
-      name='repeat_copy',):
+      name='one_hop',):
     """Creates an instance of RepeatCopy task.
 
     Args:
       name: A name for the generator instance (for name scope purposes).
-      num_bits: The dimensionality of each random binary vector.
       batch_size: Minibatch size per realization.
       min_length: Lower limit on number of random binary vectors in the
           observation pattern.
@@ -213,11 +211,10 @@ class OneHop(snt.AbstractModule):
     super(OneHop, self).__init__(name=name)
 
     self._batch_size = batch_size
-    self._num_bits = num_bits
-    self._min_length = min_length
-    self._max_length = max_length
-    self._min_repeats = min_repeats
-    self._max_repeats = max_repeats
+    self._word_length = word_length
+    self._max_items = max_items
+    self._max_edges = max_edges
+    self._max_questions = max_questions
     self._norm_max = norm_max
     self._log_prob_in_bits = log_prob_in_bits
     self._time_average_cost = time_average_cost
@@ -237,170 +234,122 @@ class OneHop(snt.AbstractModule):
     return self._log_prob_in_bits
 
   @property
-  def num_bits(self):
-    """The dimensionality of each random binary vector in a pattern."""
-    return self._num_bits
-
-  @property
-  def target_size(self):
-    """The dimensionality of the target tensor."""
-    return 20#self._num_bits + 1
-
-  @property
   def batch_size(self):
     return self._batch_size
 
-  def _build(self):
-    """Implements build method which adds ops to graph."""
-    print("Hi")
-    obs_batch_shape = [24, 24, 20]
-    targ_batch_shape = [24, 24, 20]
-    mask_batch_trans_shape = [24, 24]
-    batch_size=24
-    obs_tensors = []
-    targ_tensors = []
-    mask_tensors = []
-    num_bits=8
-    # Generates patterns for each batch element independently.
-    for batch_index in range(batch_size):
-      sub_seq_len = 6
+  @property
+  def word_length(self):
+    return self._word_length
 
-      # The observation pattern is a sequence of random binary vectors.
-      obsarr=[
-        [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0]
-      ]
+  def _input_generator(self):
 
-      """,#1
-              [1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # 2
-              [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # 3
-              [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # 4
-              [0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # 5
-              [0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # 6
-              [0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # 7
-              [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],  # 8
-              [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0],  # 9
-              [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # 10
-              [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],  # 11
-              [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # 12
-              [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # 13
-              [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # 14
-              [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # 15
-              [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
-              """
 
-      targarr = [
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-      ]
+    for w in range(1000):
+      obsarr = [[0 if x != self._word_length - 2 else 1 for x in range(self._word_length)]]
+      targarr = [[0 for x in range(self._word_length)]]
+      items_counter = 1
 
-      """,  # 1
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 2
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 3
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 4
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 5
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 6
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 7
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 8
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 9
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 10
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 11
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,1,0],  # 12
-      [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 13
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,1],  # 14
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0],  # 15
-      [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0,0]"""
-
-      max_items=24 #(<=)
-      items_counter=1
-      edge_count=random.choice(range(1,4))
-      edge_tracker=dict()
-      for i in range(0,edge_count):
-        v1=random.choice(range(1,17))
-        v2 = random.choice(range(1, 17))
-        while (v2==v1):
-          v2 = random.choice(range(1, 17))
+      #Edge insertion....
+      edge_count = random.choice(range(1, self._max_edges+1))
+      edge_tracker = dict()
+      for i in range(0, edge_count):
+        #We pick 2 random vertices
+        v1 = random.choice(range(1, self._word_length-2))
+        v2 = random.choice(range(1, self._word_length-2))
+        while (v2 == v1): #No self-loops
+          v2 = random.choice(range(1, self._word_length-2))
+        #We track the existing edges, for question-answering purposes
         if v1 in edge_tracker:
-          a=edge_tracker[v1]
-          a.add(v2)
-          edge_tracker[v1]=a
-        else:
-          a=set()
+          a = edge_tracker[v1]
           a.add(v2)
           edge_tracker[v1] = a
-        insert= [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
-        insert[v1-1]=1
-        insert[v2-1]=1
-        items_counter+=1
+        else:
+          a = set()
+          a.add(v2)
+          edge_tracker[v1] = a
+
+        #Next we insert a sequence of 3 items: edge, source vertex, target vertex...
+        insert = [0 for x in range(self._word_length)]
+        insert[v1 - 1] = 1
+        insert[v2 - 1] = 1
+        items_counter += 1
         obsarr.append(insert)
-        insert2 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+        insert2 = [0 for x in range(self._word_length)]
         insert2[v1 - 1] = 1
         obsarr.append(insert2)
         items_counter += 1
-        insert3 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+        insert3 = [0 for x in range(self._word_length)]
         insert3[v2 - 1] = 1
         obsarr.append(insert3)
         items_counter += 1
-      obsarr.append([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
-      items_counter+=1
-      obsarr.append([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0])
-      items_counter += 1
 
-      q_count = random.choice(range(1, 4))
-      for i in range(1, items_counter+q_count+1):
-        targarr.append([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-      targarr.append([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0])
+      #Questions and answers...
+      obsarr.append([0 if x != self._word_length - 1 else 1 for x in range(self._word_length)])
+      items_counter += 1
+      obsarr.append([0 if x != self._word_length - 2 else 1 for x in range(self._word_length)])
+      items_counter += 1
+      q_count = random.choice(range(1, self._max_questions+1))
+      for i in range(1, items_counter + q_count):
+        targarr.append([0 for x in range(self._word_length)])
+      targarr.append([0 if x != self._word_length - 2 else 1 for x in range(self._word_length)])
       items_counter2 = items_counter + q_count
       items_counter2 += 1
 
-      maskarr=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-      for i in range(items_counter+q_count+1,max_items):
-        maskarr[i]=1
-      maskarr = np.array(maskarr)
+      #Once we know the number of questions, we can also define the mask...
+      maskarr = np.zeros((self._max_items,))
+      for i in range(items_counter + q_count + 1, self._max_items):
+        maskarr[i] = 1
 
-      for i in range(0,q_count):
-        insert = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        pick=random.choice(list(edge_tracker.keys()))
-        insert[pick-1]=1
-        items_counter+=1
+      #Questions and answers...
+      for i in range(0, q_count):
+        insert = [0 for x in range(self._word_length)]
+        pick = random.choice(list(edge_tracker.keys()))
+        insert[pick - 1] = 1
+        items_counter += 1
         obsarr.append(insert)
         for tgt in list(edge_tracker[pick]):
-          insert = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-          insert[tgt-1] = 1
+          insert = [0 for x in range(self._word_length)]
+          insert[tgt - 1] = 1
           items_counter2 += 1
           targarr.append(insert)
-      targarr.append([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
-      obsarr.append([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+      targarr.append([0 if x != self._word_length - 1 else 1 for x in range(self._word_length)])
+      obsarr.append([0 if x != self._word_length - 1 else 1 for x in range(self._word_length)])
       items_counter += 1
       items_counter2 += 1
 
+      while (items_counter < self._max_items):
+        obsarr.append([0 for x in range(self._word_length)])
+        items_counter += 1
+      while (items_counter2 < self._max_items):
+        targarr.append([0 for x in range(self._word_length)])
+        items_counter2 += 1
 
+      obsarr = np.array(obsarr)
+      targarr = np.array(targarr)
+      yield obsarr, targarr, maskarr
 
+  def _build(self):
+    """Implements build method which adds ops to graph."""
+    obs_batch_shape = [self._batch_size, self._max_items, self._word_length]
+    targ_batch_shape = [self._batch_size, self._max_items, self._word_length]
+    mask_batch_trans_shape = [self._batch_size, self._max_items]
+    obs_tensors = []
+    targ_tensors = []
+    mask_tensors = []
 
-      while (items_counter<max_items):
-        obsarr.append([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        items_counter+=1
-      while (items_counter2<max_items-1):
-        targarr.append([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        items_counter2+=1
+    # Generates patterns for each element independently.
+    dataset = tf.data.Dataset.from_generator(self._input_generator, (tf.float32, tf.float32, tf.float32), (tf.TensorShape([self._max_items,self._word_length]), tf.TensorShape([self._max_items,self._word_length]),tf.TensorShape([self._max_items])))
+    dataset = dataset.repeat(count=-1)#An infinite repeat of the generator...
+    for batch_index in range(self._batch_size):
+      iterator = dataset.make_one_shot_iterator()
+      x, y, z = iterator.get_next()
+      obs_tensors.append(x)
+      targ_tensors.append(y)
+      mask_tensors.append(z)
+      # Concatenate each batch element into a single tensor.
 
-      obsarr=np.array(obsarr)
-      obs = tf.cast(tf.convert_to_tensor(obsarr),tf.float32)
-
-      targarr=np.array(targarr)
-      targ = tf.cast(tf.convert_to_tensor(targarr),tf.float32)
-
-      mask = tf.cast(tf.convert_to_tensor(maskarr)
-        ,
-        tf.float32)
-
-      #print(obsarr)
-      #print(targarr)
-      #print(maskarr)
-
-      obs_tensors.append(obs)
-      targ_tensors.append(targ)
-      mask_tensors.append(mask)
-
-    # Concatenate each batch element into a single tensor.
     obs = tf.reshape(tf.concat(obs_tensors, 1), obs_batch_shape)
     targ = tf.reshape(tf.concat(targ_tensors, 1), targ_batch_shape)
     mask = tf.transpose(
