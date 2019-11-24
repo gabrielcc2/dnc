@@ -43,13 +43,14 @@ tf.flags.DEFINE_float("max_grad_norm", 50, "Gradient clipping norm limit.")
 #                      "Epsilon used for RMSProp optimizer.") #Unused
 
 # Task parameters
-tf.flags.DEFINE_integer("batch_size", 32, "Batch size for training.")
+tf.flags.DEFINE_integer("batch_size", 16, "Batch size for training.")
 tf.flags.DEFINE_integer("word_length", 20, "Overall size of observation (# possible vertices + start and end markers).")
 tf.flags.DEFINE_integer("max_items", 32, "Overall length of sequence.")
 tf.flags.DEFINE_integer("max_edges", 10, "Max number of edges in input sequence (up to 10 are currently supported).")
 tf.flags.DEFINE_integer("max_questions", 6, "Max number of questions in input sequence (up to 6 currently supported).")
-tf.flags.DEFINE_bool("curriculum_strategy", False, "Whether to use a curriculum strategy or not.")
-tf.flags.DEFINE_float("curriculum_loss_threshold", 0.5, "Lower bound on the loss, that signals that we can increase the difficulty of the task")
+tf.flags.DEFINE_bool("curriculum_learning", True, "Whether to use a curriculum learning or not.")
+tf.flags.DEFINE_string("curriculum_strategy", "interleaved", "Kind of strategy, either regular or interleaved")
+tf.flags.DEFINE_float("curriculum_loss_threshold", 2.0, "Lower bound on the loss, that signals that we can increase the difficulty of the task")
 
 
 # Training options.
@@ -92,7 +93,7 @@ def train(num_training_iterations, report_interval):
 
   tensorboard = Tensorboard(FLAGS.checkpoint_dir)
   dataset = []
-  if not FLAGS.curriculum_strategy:
+  if not FLAGS.curriculum_learning:
     dataset=one_hop_task.OneHop(FLAGS.batch_size,
                                    FLAGS.word_length, FLAGS.max_items,
                                    FLAGS.max_edges, FLAGS.max_questions)
@@ -145,6 +146,7 @@ def train(num_training_iterations, report_interval):
     update=0
     start_iteration = sess.run(global_step)
     total_loss = 0
+    update_edges=True
 
     for train_iteration in range(start_iteration, num_training_iterations):
       _, loss = sess.run([train_step, train_loss])
@@ -160,15 +162,28 @@ def train(num_training_iterations, report_interval):
         tensorboard.log_summary(
             total_loss / report_interval, dataset._max_edges, dataset._max_questions, train_iteration)
 
-        if FLAGS.curriculum_strategy!=0:
-          if dataset._max_edges>=FLAGS.max_edges:
-            if (total_loss/report_interval) < FLAGS.curriculum_loss_threshold and (train_iteration - update) > 500 and dataset._max_questions<FLAGS.max_questions:
-              dataset._max_questions+=1
-              update=train_iteration
-          elif (total_loss / report_interval) < FLAGS.curriculum_loss_threshold and (train_iteration - update) > 500 and dataset._max_edges < FLAGS.max_edges:
-            dataset._max_edges += 1
-            update = train_iteration
-
+        if FLAGS.curriculum_learning:
+          if FLAGS.curriculum_strategy == "regular":
+            if dataset._max_edges >= FLAGS.max_edges:
+                if (total_loss / report_interval) < FLAGS.curriculum_loss_threshold and (
+                        train_iteration - update) > 500 and dataset._max_questions < FLAGS.max_questions:
+                    dataset._max_questions += 1
+                    update = train_iteration
+            elif (total_loss / report_interval) < FLAGS.curriculum_loss_threshold and (
+                    train_iteration - update) > 500 and dataset._max_edges < FLAGS.max_edges:
+                dataset._max_edges += 1
+                update = train_iteration
+          elif FLAGS.curriculum_strategy=="interleaved":
+            if update_edges and (total_loss / report_interval) < FLAGS.curriculum_loss_threshold and (train_iteration - update) > 500 and dataset._max_edges < FLAGS.max_edges:
+              dataset._max_edges += 1
+              update = train_iteration
+              update_edges=False
+              if dataset._max_questions>=FLAGS.max_questions:
+                update_edges=True
+            elif (total_loss/report_interval) < FLAGS.curriculum_loss_threshold and (train_iteration - update) > 500 and dataset._max_questions<FLAGS.max_questions and not update_edges:
+              update_edges=True
+              dataset._max_questions += 1
+              update = train_iteration
         total_loss = 0
 
 def main(unused_argv):
