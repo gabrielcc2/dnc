@@ -132,14 +132,32 @@ class OneHop(snt.AbstractModule):
   For each realisation from this generator, the observation sequence is
   comprised of some binary vectors (and some flags).
 
-  This observation sequence encodes the structure of some graph, providing
-  first 2 ones in the positions that correspond to the vertexes being connected,
-  followed by a 1 in the position of the start node, and 1 in the position of
-  the end node.
+  This is how vertices are encoded:
 
-  After giving the structure, it encodes some questions for the paired nodes.
+           1:         00001
+           2:         00010
+           3:         00011
+           4:         00100
+           5:         00101
+           6:         00110
+           7:         00111
+           8:         01000
+           9:         01001
+          10:         01010
 
-  The target sequence is comprised of the answers (the matching vertex).
+  At the moment only 10 vertices are supported.
+
+  The observation space contains on the first rows edges, where each
+  contains of one source vertex and one source edge.
+  e.g. 0000100010
+
+  After the question marker, which indicates the number of questions,
+  the observation space includes a series of source vertices as questions..
+  As answers we will have the target vertices.
+
+  The target sequence is comprised of the answers (the matching vertices),in
+  the top right section.
+
   Here's an example:
 
   ```none
@@ -147,25 +165,51 @@ class OneHop(snt.AbstractModule):
 
   time ------------------------------------------>
 
-                +-------------------------------+
-  mask:         |0000000000111111111111111111111|
-                +-------------------------------+
+                +----------------------------------+
+  mask:         |0000000000011111111111111111111111|
+                +----------------------------------+
 
-                +-------------------------------+
-  target:       |               1              |
-                |                              |
-                |                              |
-                |             1                | 'start-marker' channel
-                |                1             | 'end-marker' channel.
-                +-------------------------------+
 
-                +-------------------------------+
-  observation:  | 110110                       |
-                | 101000                       |
-                | 000101    1                  |
-                |1        1                    | 'start-marker' channel
-                |       1    1                 | 'end-marker' channel.
-                +-------------------------------+
+                +----------------------------------+
+  target:       |           00010                  | 2 (1->2)
+                |           00011                  | 3 (1->3)  When a single vertex will match to multiple
+                |           00001                  | 1 (2->1)  the order of insertion is preserved
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                +----------------------------------+
+                +----------------------------------+
+  observation:  | 0000100010                       | 1->2
+                | 0000100011                       | 1->3
+                | 0101001001                       | 10->9
+                | 0001000001                       | 2->1
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  | (up to max edges: 10)
+                |1                                 | 'start-marker' channel
+                |           2                      | 'number of questions' channel.
+                | 00001                            |
+                | 00010                            |
+                |                                  |
+                |                                  |
+                |                                  |
+                |                                  |  (up to max questions: 6)
+                +----------------------------------+
   ```
 
   As in the diagram, the target sequence is offset to begin directly after the
@@ -239,9 +283,10 @@ class OneHop(snt.AbstractModule):
     return self._word_length
 
   def _input_generator(self):
-    for w in range(1000):
-      obsarr = [[0 if x != self._word_length - 2 else 1 for x in range(self._word_length)]]
-      targarr = [[0 for x in range(self._word_length)]]
+    size_edges=10
+    for w in range(1):
+      obsarr = [[0 if x != size_edges else 1 for x in range(self._word_length)]] #Was max_edges
+      targarr = np.zeros((self._max_items, self.word_length))
       items_counter = 1
 
       #Edge insertion....
@@ -249,86 +294,104 @@ class OneHop(snt.AbstractModule):
       edge_tracker = dict()
       for i in range(0, edge_count):
         #We pick 2 random vertices
-        v1 = random.choice(range(1, self._word_length-2))
-        v2 = random.choice(range(1, self._word_length-2))
-        while (v2 == v1): #No self-loops
-          v2 = random.choice(range(1, self._word_length-2))
-        #We track the existing edges, for question-answering purposes
+        v1 = random.choice(range(1, int(self._word_length/2)+1))
+        v2 = random.choice(range(1, int(self._word_length/2)+1))
+        while (v2 == v1 or (v1 in edge_tracker and v2 in edge_tracker[v1])): #No self-loops, nor repeated edges...
+          v2 = random.choice(range(1, int(self._word_length/2)+3))
+        #We track the existing edges, for question-answering purposes.
         if v1 in edge_tracker:
           a = edge_tracker[v1]
-          a.add(v2)
+          a.append(v2)
           edge_tracker[v1] = a
         else:
-          a = set()
-          a.add(v2)
+          a = []#We use a list for preserving the order of insertion.
+          a.append(v2)
           edge_tracker[v1] = a
 
-        #Next we insert a sequence of 3 items: edge, source vertex, target vertex...
-        insert = [0 for x in range(self._word_length)]
-        insert[v1 - 1] = 1
-        insert[v2 - 1] = 1
-        items_counter += 1
-        obsarr.append(insert)
 
-        insert2 = [0 for x in range(self._word_length)]
-        insert2[v1 - 1] = 1
-        obsarr.append(insert2)
-        items_counter += 1
+      #Now we actually insert into the observation array...
+      arrs_to_insert= [[0 for x in range(self._word_length)]]
+      arrs_ins= 1
+      while (arrs_ins<int(self.word_length/2)):
+        arrs_to_insert.append([0 for x in range(self._word_length)])
+        arrs_ins+=1
+      line=0
+      for item in edge_tracker.keys():
+        for v in edge_tracker[item]:
+          if item % 2==1:
+            arrs_to_insert[int(self.word_length/4)-1][line] = 1
+          if item in set([2,3,6,7,10]):
+            arrs_to_insert[int(self.word_length /4)-2][line] = 1
+          if item in set([4,5,6,7]):
+            arrs_to_insert[int(self.word_length /4)-3][line] = 1
+          if item>7:
+            arrs_to_insert[int(self.word_length /4)- 4][line] = 1
 
-        insert3 = [0 for x in range(self._word_length)]
-        insert3[v2 - 1] = 1
-        obsarr.append(insert3)
-        items_counter += 1
+          if v % 2==1:
+            arrs_to_insert[int(self.word_length/2)-1][line] = 1
+          if v in set([2,3,6,7,10]):
+            arrs_to_insert[int(self.word_length / 2)-2][line] = 1
+          if v in set([4,5,6,7]):
+            arrs_to_insert[int(self.word_length / 2)-3][line] = 1
+          if v>7:
+            arrs_to_insert[int(self.word_length / 2) - 4][line] = 1
+          line+=1
+      for item in arrs_to_insert:
+        obsarr.append(item)
+        items_counter+=1
 
       #Questions and answers...
-      obsarr.append([0 if x != self._word_length - 1 else 1 for x in range(self._word_length)])
+      q_count = random.choice(range(1, min(self._max_questions, len(edge_tracker.keys()))+1))#The number of questions
+      obsarr.append([0 if (x != size_edges+1) else q_count for x in range(self._word_length)])
       items_counter += 1
-      obsarr.append([0 if x != self._word_length - 2 else 1 for x in range(self._word_length)])
-      items_counter += 1
-      q_count = random.choice(range(1, self._max_questions+1))
-      for i in range(1, items_counter + q_count):
-        targarr.append([0 for x in range(self._word_length)])
-      targarr.append([0 if x != self._word_length - 2 else 1 for x in range(self._word_length)])
-      items_counter2 = items_counter + q_count
-      items_counter2 += 1
 
-      #Once we know the number of questions, we can also define the mask...
       maskarr = np.zeros((self._max_items,))
-      for i in range(items_counter + q_count + 1, self._max_items):
+      for i in range(items_counter, self._max_items):
         maskarr[i] = 1
 
-      #Questions and answers...
+      line1=size_edges+2
+      line2 = 0
+      possible_choices= list(edge_tracker.keys())
       for i in range(0, q_count):
-        insert = [0 for x in range(self._word_length)]
-        pick = random.choice(list(edge_tracker.keys()))
-        insert[pick - 1] = 1
-        items_counter += 1
-        obsarr.append(insert)
+        pick = random.choice(possible_choices)
+        possible_choices.remove(pick)
+        if pick % 2 == 1:
+          obsarr[int(self.word_length / 4)][line1] = 1
+        if pick in set([2, 3, 6, 7, 10]):
+          obsarr[int(self.word_length / 4)-1][line1] = 1
+        if pick in set([4, 5, 6, 7]):
+          obsarr[int(self.word_length / 4)-2][line1] = 1
+        if pick > 7:
+          obsarr[int(self.word_length / 4) - 3][line1] = 1
         for tgt in list(edge_tracker[pick]):
-          insert = [0 for x in range(self._word_length)]
-          insert[tgt - 1] = 1
-          items_counter2 += 1
-          targarr.append(insert)
-      targarr.append([0 if x != self._word_length - 1 else 1 for x in range(self._word_length)])
-      obsarr.append([0 if x != self._word_length - 1 else 1 for x in range(self._word_length)])
-      items_counter += 1
-      items_counter2 += 1
+          if line2 >= self.word_length: #Unnecessary check
+            line1 == self.word_length
+            break
+          if tgt % 2 == 1:
+            targarr[int(self.word_length / 2)+2+int(self.word_length / 4) - 1][line2] = 1
+          if tgt in set([2, 3, 6, 7, 10]):
+            targarr[int(self.word_length / 2)+2+int(self.word_length / 4)-2][line2] = 1
+          if tgt in set([4, 5, 6, 7]):
+            targarr[int(self.word_length / 2)+2+int(self.word_length / 4)-3][line2] = 1
+          if tgt > 7:
+            targarr[int(self.word_length / 2)+2+int(self.word_length / 4) - 4][line2] = 1
+          line2+=1
+        line1+=1
+        if line1>=self.word_length: #Unnecessary check
+          break
 
+      #Padding with 0s
       while (items_counter < self._max_items):
         obsarr.append([0 for x in range(self._word_length)])
         items_counter += 1
-      while (items_counter2 < self._max_items):
-        targarr.append([0 for x in range(self._word_length)])
-        items_counter2 += 1
 
       obsarr = np.array(obsarr)
-      targarr = np.array(targarr)
       yield obsarr, targarr, maskarr
 
   def _build(self):
     """Implements build method which adds ops to graph."""
-    obs_batch_shape = [self._batch_size, self._max_items, self._word_length]
-    targ_batch_shape = [self._batch_size, self._max_items, self._word_length]
+    obs_batch_shape = [self._max_items, self._batch_size, self._word_length]
+    targ_batch_shape = [self._max_items, self._batch_size, self._word_length]
     mask_batch_trans_shape = [self._batch_size, self._max_items]
     obs_tensors = []
     targ_tensors = []
@@ -343,8 +406,8 @@ class OneHop(snt.AbstractModule):
       obs_tensors.append(x)
       targ_tensors.append(y)
       mask_tensors.append(z)
-      # Concatenate each batch element into a single tensor.
 
+    # Concatenate each batch element into a single tensor.
     obs = tf.reshape(tf.concat(obs_tensors, 1), obs_batch_shape)
     targ = tf.reshape(tf.concat(targ_tensors, 1), targ_batch_shape)
     mask = tf.transpose(
