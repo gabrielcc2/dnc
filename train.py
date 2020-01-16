@@ -46,10 +46,12 @@ tf.flags.DEFINE_float("max_grad_norm", 50, "Gradient clipping norm limit.")
 
 # Task parameters
 tf.flags.DEFINE_integer("batch_size", 16, "Batch size for training.")
-tf.flags.DEFINE_integer("word_length", 50, "Overall size of observation (# possible vertices + start and end markers).")
-tf.flags.DEFINE_integer("max_items", 2000, "Overall length of sequence.")
+tf.flags.DEFINE_integer("word_length", 13, "Overall size of observation (# possible vertices + start and end markers).")
+tf.flags.DEFINE_integer("max_items", 74, "Overall length of sequence.")
+
 tf.flags.DEFINE_integer("max_edges", 100, "Max number of edges in input sequence (up to 10 are currently supported).")
 tf.flags.DEFINE_integer("max_questions", 6, "Max number of questions in input sequence (up to 6 currently supported).")
+
 tf.flags.DEFINE_bool("curriculum_learning", True, "Whether to use a curriculum learning or not.")
 tf.flags.DEFINE_string("curriculum_strategy", "interleaved", "Kind of strategy, either regular or interleaved")
 tf.flags.DEFINE_float("curriculum_loss_threshold", 2.0,

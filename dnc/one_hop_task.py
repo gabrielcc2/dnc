@@ -282,10 +282,13 @@ class OneHop(snt.AbstractModule):
             df = pd.read_csv(data + '.csv', delimiter='|')
             df.drop('creationDate', axis=1, inplace=True)
 
-            df = df.drop(df.index[2000:180623])
+            df = df.drop(df.index[10:180623])
+
+            # ---------------------------------------------------------------------
 
             distinc_id_1 = df.groupby('Person.id')
             ids_1 = list(distinc_id_1.groups)
+
 
             new_ids_1 = {}
             for i in range(len(ids_1)):
@@ -294,15 +297,19 @@ class OneHop(snt.AbstractModule):
             distinc_id_2 = df.groupby('Person.id.1')
             ids_2 = list(distinc_id_2.groups)
 
+            counter = len(ids_1)
             new_ids_2 = {}
             for i in range(len(ids_2)):
-                new_ids_2[ids_2[i]] = i
-
+                if ids_2[i] in new_ids_1:
+                    new_ids_2[ids_2[i]] = new_ids_1[ids_2[i]]
+                else:
+                    new_ids_2[ids_2[i]]=counter
+                    counter+=1
             df['Person.id'] = df['Person.id'].apply(lambda x: '{:014b}'.format(new_ids_1[x]))
             df['Person.id.1'] = df['Person.id.1'].apply(lambda x: '{:014b}'.format(new_ids_2[x]))
 
-            # ---------------------------------------------------------------------
 
+            # ---------------------------------------------------------------------
             G = nx.Graph()
 
             all_edges = list(zip(df['Person.id'], df['Person.id.1']))
@@ -323,7 +330,10 @@ class OneHop(snt.AbstractModule):
             # ---------------------------------------------------------------------
             answers = []
             for item in questions:
-                shortest_path = nx.shortest_path(G, item[0], item[1])
+                try:
+                    shortest_path = nx.shortest_path(G, item[0], item[1])
+                except nx.exception.NetworkXNoPath:
+                    shortest_path=[]
                 answers.append(shortest_path)
 
             # obs_pattern_shape = [sub_seq_len, num_bits]
@@ -335,6 +345,8 @@ class OneHop(snt.AbstractModule):
                 'answers': answers
             }
 
+            """
+... Here we should give something for Neo4j people...
             dim1 = len(questions)
             dim2 = len(questions[0])
             dimensions = {'rows': dim1,
@@ -386,15 +398,22 @@ class OneHop(snt.AbstractModule):
                 # print("answers type = " + str(answers.dtype) + "  answers1.type = " + str(answers1.dtype))
                 answers1[:answers.shape[0], :answers.shape[1]] = answers[:answers1.shape[0], :answers1.shape[1]]
 
-            questions1 = questions1.reshape((questions1.shape[0],))
-            answers1 = np.array(answers1, dtype=np.float32)
-            questions1 = np.array(questions1, dtype=np.float32)
-            df1 = np.array(df1, dtype=np.float32)
             # output2 = my_func(df)
 
             # return output2
 
-            yield df1, answers1, questions1
+            """
+
+            questions1 = questions1.reshape((questions1.shape[0],))
+            answers1 = np.array(answers1, dtype=np.float32)
+            questions1 = np.array(questions1, dtype=np.float32)
+            df1 = np.array(df1, dtype=np.float32)
+
+            maskarr = np.zeros((self._max_items,))
+            for i in range(38, self._max_items):
+                maskarr[i] = 1
+
+            yield df1, answers1, maskarr#
 
     def _build(self):
         """Implements build method which adds ops to graph."""
