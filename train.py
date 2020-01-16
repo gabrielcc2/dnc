@@ -25,6 +25,8 @@ from dnc import dnc
 from dnc import one_hop_task
 from tensorboard import Tensorboard
 
+from tensorflow.python.tools.inspect_checkpoint import print_tensors_in_checkpoint_file
+
 FLAGS = tf.flags.FLAGS
 
 # Model parameters
@@ -38,60 +40,228 @@ tf.flags.DEFINE_integer("clip_value", 20,
 
 # Optimizer parameters.
 tf.flags.DEFINE_float("max_grad_norm", 50, "Gradient clipping norm limit.")
-#tf.flags.DEFINE_float("learning_rate", 1e-4, "Optimizer learning rate.") #Unused
-#tf.flags.DEFINE_float("optimizer_epsilon", 1e-10,
+# tf.flags.DEFINE_float("learning_rate", 1e-4, "Optimizer learning rate.") #Unused
+# tf.flags.DEFINE_float("optimizer_epsilon", 1e-10,
 #                      "Epsilon used for RMSProp optimizer.") #Unused
 
 # Task parameters
 tf.flags.DEFINE_integer("batch_size", 16, "Batch size for training.")
-tf.flags.DEFINE_integer("word_length", 20, "Overall size of observation (# possible vertices + start and end markers).")
-tf.flags.DEFINE_integer("max_items", 32, "Overall length of sequence.")
-tf.flags.DEFINE_integer("max_edges", 10, "Max number of edges in input sequence (up to 10 are currently supported).")
+tf.flags.DEFINE_integer("word_length", 50, "Overall size of observation (# possible vertices + start and end markers).")
+tf.flags.DEFINE_integer("max_items", 2000, "Overall length of sequence.")
+tf.flags.DEFINE_integer("max_edges", 100, "Max number of edges in input sequence (up to 10 are currently supported).")
 tf.flags.DEFINE_integer("max_questions", 6, "Max number of questions in input sequence (up to 6 currently supported).")
 tf.flags.DEFINE_bool("curriculum_learning", True, "Whether to use a curriculum learning or not.")
 tf.flags.DEFINE_string("curriculum_strategy", "interleaved", "Kind of strategy, either regular or interleaved")
-tf.flags.DEFINE_float("curriculum_loss_threshold", 2.0, "Lower bound on the loss, that signals that we can increase the difficulty of the task")
-
+tf.flags.DEFINE_float("curriculum_loss_threshold", 2.0,
+                      "Lower bound on the loss, that signals that we can increase the difficulty of the task")
 
 # Training options.
-tf.flags.DEFINE_integer("num_training_iterations", 1000000,
+tf.flags.DEFINE_integer("num_training_iterations", 3,
                         "Number of iterations to train for.")
-tf.flags.DEFINE_integer("report_interval", 100,
+tf.flags.DEFINE_integer("report_interval", 200,
                         "Iterations between reports (samples, valid loss).")
+tf.flags.DEFINE_integer("num_test_iterations", 2,
+                        "Number of iterations to train for.")
+tf.flags.DEFINE_integer("test_report_interval", 1,
+                        "Iterations between test reports.")
 tf.flags.DEFINE_string("checkpoint_dir", "/tmp/tf/dnc",
                        "Checkpointing directory.")
-tf.flags.DEFINE_integer("checkpoint_interval", 5000,
+tf.flags.DEFINE_integer("checkpoint_interval", 400,
                         "Checkpointing step interval.")
 
+
 def run_model(input_sequence, output_size):
-  """Runs model on input sequence."""
+    """Runs model on input sequence."""
 
-  access_config = {
-      "memory_size": FLAGS.memory_size,
-      "word_size": FLAGS.word_size,
-      "num_reads": FLAGS.num_read_heads,
-      "num_writes": FLAGS.num_write_heads,
-  }
-  controller_config = {
-      "hidden_size": FLAGS.hidden_size,
-  }
-  clip_value = FLAGS.clip_value
+    access_config = {
+        "memory_size": FLAGS.memory_size,
+        "word_size": FLAGS.word_size,
+        "num_reads": FLAGS.num_read_heads,
+        "num_writes": FLAGS.num_write_heads,
+    }
+    controller_config = {
+        "hidden_size": FLAGS.hidden_size,
+    }
+    clip_value = FLAGS.clip_value
 
-  dnc_core = dnc.DNC(access_config, controller_config, output_size, clip_value)
-  initial_state = dnc_core.initial_state(FLAGS.batch_size)
-  output_sequence, _ = tf.nn.dynamic_rnn(
-      cell=dnc_core,
-      inputs=input_sequence,
-      time_major=True,
-      initial_state=initial_state)
+    dnc_core = dnc.DNC(access_config, controller_config, output_size, clip_value)
+    initial_state = dnc_core.initial_state(FLAGS.batch_size)
+    output_sequence, _ = tf.nn.dynamic_rnn(
+        cell=dnc_core,
+        inputs=input_sequence,
+        time_major=True,
+        initial_state=initial_state)
+    print("output sequence = " + str(output_sequence))  ## added by ismail
 
-  return output_sequence
+    return output_sequence
 
 
-def train(num_training_iterations, report_interval):
+def run_model_test(input_sequence, output_size):
+    """Runs model on input sequence."""
+
+    access_config = {
+        "memory_size": FLAGS.memory_size,
+        "word_size": FLAGS.word_size,
+        "num_reads": FLAGS.num_read_heads,
+        "num_writes": FLAGS.num_write_heads,
+    }
+    controller_config = {
+        "hidden_size": FLAGS.hidden_size,
+    }
+    clip_value = FLAGS.clip_value
+
+    dnc_core = dnc.DNC(access_config, controller_config, output_size, clip_value)
+    initial_state = dnc_core.initial_state(FLAGS.batch_size)
+    output_sequence, _ = tf.nn.dynamic_rnn(
+        cell=dnc_core,
+        inputs=input_sequence,
+        time_major=True,
+        initial_state=initial_state)
+    print("output sequence = " + str(output_sequence))  ## added by ismail
+
+    return output_sequence
+
+
+def train(num_training_iterations, report_interval, num_test_iterations):
+    """Trains the DNC and periodically reports the loss."""
+
+    tensorboard = Tensorboard(FLAGS.checkpoint_dir)
+
+    dataset = []
+    dataset_test = []
+
+    if not FLAGS.curriculum_learning:
+        dataset = one_hop_task.OneHop(FLAGS.batch_size,
+                                      FLAGS.word_length, FLAGS.max_items,
+                                      FLAGS.max_edges, FLAGS.max_questions)
+        dataset_test = one_hop_task.OneHop(FLAGS.batch_size,
+                                           FLAGS.word_length, FLAGS.max_items,
+                                           FLAGS.max_edges, FLAGS.max_questions)
+    else:
+        dataset = one_hop_task.OneHop(FLAGS.batch_size,
+                                      FLAGS.word_length, FLAGS.max_items,
+                                      1, 1)
+        dataset_test = one_hop_task.OneHop(FLAGS.batch_size,
+                                           FLAGS.word_length, FLAGS.max_items,
+                                           1, 1)
+
+    dataset_tensors = dataset()
+    dataset_tensors_test = dataset_test()
+    print("dataset_tensors = " + str(dataset_tensors))  ## added by ismail
+
+    output_logits = run_model(dataset_tensors.observations, dataset.word_length)
+    output_logits_test = run_model_test(dataset_tensors_test.observations, dataset_test.word_length)
+
+    output = tf.round(
+        tf.expand_dims(dataset_tensors.mask, -1) * tf.sigmoid(output_logits))
+    output_test = tf.round(
+        tf.expand_dims(dataset_tensors_test.mask, -1) * tf.sigmoid(output_logits_test))
+
+    train_loss = dataset.cost(output_logits, dataset_tensors.target,
+                              dataset_tensors.mask)
+    print("Train Loss = " + str(train_loss))  ## added by ismail
+
+    # Set up optimizer with global norm clipping.
+    trainable_variables = tf.compat.v1.trainable_variables()
+    grads, _ = tf.clip_by_global_norm(
+        tf.gradients(train_loss, trainable_variables), FLAGS.max_grad_norm)
+
+    global_step = tf.get_variable(
+        name="global_step",
+        shape=[],
+        dtype=tf.int64,
+        initializer=tf.zeros_initializer(),
+        trainable=False,
+        collections=[tf.GraphKeys.GLOBAL_VARIABLES, tf.GraphKeys.GLOBAL_STEP])
+
+    optimizer = tf.compat.v1.train.AdamOptimizer()  # Note we commented out the use of RMSProp... RMSPropOptimizer(#FLAGS.learning_rate, epsilon=FLAGS.optimizer_epsilon)
+    train_step = optimizer.apply_gradients(
+        zip(grads, trainable_variables), global_step=global_step)
+
+    saver = tf.compat.v1.train.Saver()
+
+    if FLAGS.checkpoint_interval > 0:
+        hooks = [
+            tf.compat.v1.train.CheckpointSaverHook(
+                checkpoint_dir=FLAGS.checkpoint_dir,
+                save_steps=FLAGS.checkpoint_interval,
+                saver=saver)
+        ]
+    else:
+        hooks = []
+
+    # Train.
+    with tf.compat.v1.train.SingularMonitoredSession(
+            hooks=hooks, checkpoint_dir=FLAGS.checkpoint_dir) as sess:
+        update = 0
+        start_iteration = sess.run(global_step)
+        total_loss = 0
+        update_edges = True
+
+        for train_iteration in range(start_iteration, num_training_iterations):
+            print("train_iteration number = " + str(train_iteration))
+            _, loss = sess.run([train_step, train_loss])
+            total_loss += loss
+
+            if (train_iteration + 1) % report_interval == 0:
+                dataset_tensors_np, output_np = sess.run([dataset_tensors, output])
+                dataset_string = dataset.to_human_readable(dataset_tensors_np,
+                                                           output_np)
+                tf.compat.v1.logging.info("%d: Avg training loss %f. Max Questions: %f.  Max Edges: %f.\n%s",
+                                          train_iteration, total_loss / report_interval, dataset._max_questions,
+                                          dataset._max_edges,
+                                          dataset_string)
+                tensorboard.log_summary(
+                    total_loss / report_interval, dataset._max_edges, dataset._max_questions, train_iteration)
+
+                if FLAGS.curriculum_learning:
+                    if FLAGS.curriculum_strategy == "regular":
+                        if dataset._max_edges >= FLAGS.max_edges:
+                            if (total_loss / report_interval) < FLAGS.curriculum_loss_threshold and (
+                                    train_iteration - update) > 500 and dataset._max_questions < FLAGS.max_questions:
+                                dataset._max_questions += 1
+                                update = train_iteration
+                        elif (total_loss / report_interval) < FLAGS.curriculum_loss_threshold and (
+                                train_iteration - update) > 500 and dataset._max_edges < FLAGS.max_edges:
+                            dataset._max_edges += 1
+                            update = train_iteration
+                    elif FLAGS.curriculum_strategy == "interleaved":
+                        if update_edges and (total_loss / report_interval) < FLAGS.curriculum_loss_threshold and (
+                                train_iteration - update) > 500 and dataset._max_edges < FLAGS.max_edges:
+                            dataset._max_edges += 1
+                            update = train_iteration
+                            update_edges = False
+                            if dataset._max_questions >= FLAGS.max_questions:
+                                update_edges = True
+                        elif (total_loss / report_interval) < FLAGS.curriculum_loss_threshold and (
+                                train_iteration - update) > 500 and dataset._max_questions < FLAGS.max_questions and not update_edges:
+                            update_edges = True
+                            dataset._max_questions += 1
+                            update = train_iteration
+                total_loss = 0
+
+        for test_iteration in range(0, num_test_iterations):
+            dataset_tensors_np, output_np = sess.run([dataset_tensors_test, output_test])
+            ##print("dataset_tensors_np = " + str(dataset_tensors_np))
+            dataset_string = dataset.to_human_readable(dataset_tensors_np,
+                                                       output_np)
+            tf.compat.v1.logging.info("Testing count %f.\n%s",
+                                      test_iteration, dataset_string)
+
+        for test_iteration in range(0, num_test_iterations):
+            dataset_tensors_np, output_np = sess.run([dataset_tensors, output])
+            ##print("dataset_tensors_np = " + str(dataset_tensors_np))
+            dataset_string = dataset.to_human_readable_test(dataset_tensors_np,
+                                                            output_np)
+            tf.compat.v1.logging.info("Testing count %f.\n%s",
+                                      test_iteration, dataset_string)
+
+
+'''
+def test(num_test_iterations):
   """Trains the DNC and periodically reports the loss."""
 
-  tensorboard = Tensorboard(FLAGS.checkpoint_dir)
+  #tensorboard = Tensorboard(FLAGS.checkpoint_dir)
   dataset = []
   if not FLAGS.curriculum_learning:
     dataset=one_hop_task.OneHop(FLAGS.batch_size,
@@ -103,17 +273,10 @@ def train(num_training_iterations, report_interval):
                                     1, 1)
 
   dataset_tensors = dataset()
+  print("dataset_tensors = " + str(dataset_tensors)) ## added by ismail
   output_logits = run_model(dataset_tensors.observations, dataset.word_length)
   output = tf.round(
       tf.expand_dims(dataset_tensors.mask, -1) * tf.sigmoid(output_logits))
-
-  train_loss = dataset.cost(output_logits, dataset_tensors.target,
-                            dataset_tensors.mask)
-
-  # Set up optimizer with global norm clipping.
-  trainable_variables = tf.compat.v1.trainable_variables()
-  grads, _ = tf.clip_by_global_norm(
-      tf.gradients(train_loss, trainable_variables), FLAGS.max_grad_norm)
 
   global_step = tf.get_variable(
       name="global_step",
@@ -122,74 +285,46 @@ def train(num_training_iterations, report_interval):
       initializer=tf.zeros_initializer(),
       trainable=False,
       collections=[tf.GraphKeys.GLOBAL_VARIABLES, tf.GraphKeys.GLOBAL_STEP])
+  optimizer = tf.compat.v1.train.AdamOptimizer()
 
 
-  optimizer = tf.compat.v1.train.AdamOptimizer()#Note we commented out the use of RMSProp... RMSPropOptimizer(#FLAGS.learning_rate, epsilon=FLAGS.optimizer_epsilon)
-  train_step = optimizer.apply_gradients(
-      zip(grads, trainable_variables), global_step=global_step)
+  #print_tensors_in_checkpoint_file(latest_ckp, all_tensors=True, tensor_name='')
+
+  model_dir = "../../../../tmp/tf/dnc"
+  latest_ckp = tf.train.latest_checkpoint(model_dir)
 
   saver = tf.compat.v1.train.Saver()
+# =============================================================================
+#   temp_saver = tf.train.Saver(variables_can_be_restored)
+#   ckpt_state = tf.train.get_checkpoint_state(checkpoint_dir, lastest_filename)
+#   print('Loading checkpoint %s' % ckpt_state.model_checkpoint_path)
+# =============================================================================
+  ##temp_saver.restore(sess, latest_ckp.model_dir)
 
-  if FLAGS.checkpoint_interval > 0:
-    hooks = [
-        tf.compat.v1.train.CheckpointSaverHook(
-            checkpoint_dir=FLAGS.checkpoint_dir,
-            save_steps=FLAGS.checkpoint_interval,
-            saver=saver)
-    ]
-  else:
-    hooks = []
+  with tf.Session(
+        latest_ckp) as sess:
 
-  # Train.
-  with tf.compat.v1.train.SingularMonitoredSession(
-      hooks=hooks, checkpoint_dir=FLAGS.checkpoint_dir) as sess:
+    saver.restore(sess, latest_ckp.model_checkpoint_path)
     update=0
     start_iteration = sess.run(global_step)
     total_loss = 0
     update_edges=True
+    for test_iteration in range(start_iteration, num_test_iterations):
+           dataset_tensors_np, output_np = sess.run([dataset_tensors, output])
+           ##print("dataset_tensors_np = " + str(dataset_tensors_np))
+           dataset_string = dataset.to_human_readable_test(dataset_tensors_np,
+                                                      output_np)
+           tf.compat.v1.logging.info("Testing count %f.\n%s",
+                          test_iteration, dataset_string)
 
-    for train_iteration in range(start_iteration, num_training_iterations):
-      _, loss = sess.run([train_step, train_loss])
-      total_loss += loss
+'''
 
-      if (train_iteration + 1) % report_interval == 0:
-        dataset_tensors_np, output_np = sess.run([dataset_tensors, output])
-        dataset_string = dataset.to_human_readable(dataset_tensors_np,
-                                                   output_np)
-        tf.compat.v1.logging.info("%d: Avg training loss %f. Max Questions: %f.  Max Edges: %f.\n%s",
-                        train_iteration, total_loss / report_interval, dataset._max_questions, dataset._max_edges,
-                        dataset_string)
-        tensorboard.log_summary(
-            total_loss / report_interval, dataset._max_edges, dataset._max_questions, train_iteration)
-
-        if FLAGS.curriculum_learning:
-          if FLAGS.curriculum_strategy == "regular":
-            if dataset._max_edges >= FLAGS.max_edges:
-                if (total_loss / report_interval) < FLAGS.curriculum_loss_threshold and (
-                        train_iteration - update) > 500 and dataset._max_questions < FLAGS.max_questions:
-                    dataset._max_questions += 1
-                    update = train_iteration
-            elif (total_loss / report_interval) < FLAGS.curriculum_loss_threshold and (
-                    train_iteration - update) > 500 and dataset._max_edges < FLAGS.max_edges:
-                dataset._max_edges += 1
-                update = train_iteration
-          elif FLAGS.curriculum_strategy=="interleaved":
-            if update_edges and (total_loss / report_interval) < FLAGS.curriculum_loss_threshold and (train_iteration - update) > 500 and dataset._max_edges < FLAGS.max_edges:
-              dataset._max_edges += 1
-              update = train_iteration
-              update_edges=False
-              if dataset._max_questions>=FLAGS.max_questions:
-                update_edges=True
-            elif (total_loss/report_interval) < FLAGS.curriculum_loss_threshold and (train_iteration - update) > 500 and dataset._max_questions<FLAGS.max_questions and not update_edges:
-              update_edges=True
-              dataset._max_questions += 1
-              update = train_iteration
-        total_loss = 0
 
 def main(unused_argv):
-  tf.compat.v1.logging.set_verbosity(3)  # Print INFO log messages.
-  train(FLAGS.num_training_iterations, FLAGS.report_interval)
+    tf.compat.v1.logging.set_verbosity(3)  # Print INFO log messages.
+    train(FLAGS.num_training_iterations, FLAGS.report_interval, FLAGS.num_test_iterations)
+    # test(FLAGS.num_test_iterations)
 
 
 if __name__ == "__main__":
-  tf.compat.v1.app.run()
+    tf.compat.v1.app.run()
